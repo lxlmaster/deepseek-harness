@@ -57,6 +57,31 @@ pnpm desktop:pack:dir    # unpacked dir build (faster smoke test)
 - **Backend spawn hangs** → check `DEEPSEEK_API_KEY`/`.env` and that the CLI entry resolves (built `lib/` vs source `tsx`).
 - **electron-builder needs the host arch toolchain**; cross-building NSIS requires Windows.
 
+## Headless validation (no GUI / CI) — Docker works
+
+The agent shell is non-interactive and has no display, so `pnpm desktop` (Electron window) and `pnpm install`'s Windows recycle-bin cleanup cannot run there. An Electron window can only be visually verified on the user's Windows desktop. BUT the hard part — backend spawn + dynamic-port handshake — can be validated headlessly in a Linux container (proven 2026-08-15).
+
+```sh
+docker run --rm \
+  -v /path/to/deepseek-harness:/repo \
+  -v dsh_node_modules:/repo/node_modules \
+  -e CI=true \
+  -w /repo node:22-bookworm bash -c "\
+    npm install -g pnpm@11.7.0 --registry https://registry.npmmirror.com && \
+    pnpm install --registry https://registry.npmmirror.com && \
+    pnpm build && \
+    pnpm --filter @deepseek-ai/dsh-web-frontend run build && \
+    node apps/desktop/scripts/smoke-backend.mjs"
+```
+
+Critical gotchas (each cost a failed run):
+- **Isolate `node_modules` in a Docker volume** (`-v dsh_node_modules:/repo/node_modules`). Without it, `pnpm install` sees the host's existing `node_modules`, wants to clean it but has no TTY → `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY`. The volume also avoids clobbering the user's Windows `node_modules`.
+- **Use the npmmirror registry.** Direct `registry.npmjs.org` hits `ECONNRESET` from the container; corepack fetching pnpm from npmjs also fails. Install pnpm via `npm -g` from npmmirror, then `pnpm install --registry npmmirror`.
+- **`CI=true`** skips the interactive removal prompt.
+- Build artifacts (`packages/*/lib`, `apps/cli/lib`, `apps/web/dist`) are written back to the mounted host dir, so the user's local `pnpm desktop` can reuse them without rebuilding.
+- `apps/desktop/scripts/smoke-backend.mjs` reproduces the main-process boot handshake (spawn `dsh web` on a free port → poll → assert 200) without creating a window. Expected last line: `[smoke] BACKEND OK — listening on http://127.0.0.1:<port>/`.
+- On Windows, `scripts/build-runtime.mjs` copies `node_modules` via `robocopy` (dereferences pnpm symlinks); `fs.cpSync` over the symlink forest crashes with `0xC0000409` (STATUS_STACK_BUFFER_OVERRUN).
+
 ## Extending
 
 - **系统托盘（已实现）**：`electron.main.cjs` 的 `createTray()` 建 `Tray`（图标 `assets/tray-icon.png`，缺失时兜底 1x1 data URL，防 Windows `new Tray` 抛错）、点击显隐、右键菜单（显示 / 重启后端 / 检查更新 / 退出）。窗口 `close` 在 win/linux 改为最小化到托盘，仅托盘「退出」或单实例才 `app.quit()` 并 `SIGTERM` 清理后端。`restartBackend()` 供 IPC 与托盘复用。重生成图标：`node apps/desktop/scripts/gen-icon.mjs`；生成 NSIS 用 `build/icon.ico`：`node apps/desktop/scripts/gen-icon-ico.mjs`（或 `pnpm desktop:gen:ico`）。
