@@ -21,7 +21,8 @@
     "copyright": "MIT",
     "files": [
       "electron.main.cjs",
-      "preload.cjs"
+      "preload.cjs",
+      "assets"
     ],
     "directories": {
       "output": "dist-electron"

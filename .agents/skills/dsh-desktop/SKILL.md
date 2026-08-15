@@ -59,4 +59,6 @@ pnpm desktop:pack:dir    # unpacked dir build (faster smoke test)
 
 ## Extending
 
-Add tray icon + auto-update by extending `electron.main.cjs` (tray via `Tray`, updater via `electron-updater`). Keep the spawn/health-check/cleanup handshake intact.
+- **系统托盘（已实现）**：`electron.main.cjs` 的 `createTray()` 建 `Tray`（图标 `assets/tray-icon.png`，缺失时兜底 1x1 data URL，防 Windows `new Tray` 抛错）、点击显隐、右键菜单（显示 / 重启后端 / 退出）。窗口 `close` 在 win/linux 改为最小化到托盘，仅托盘「退出」或单实例才 `app.quit()` 并 `SIGTERM` 清理后端。`restartBackend()` 供 IPC 与托盘复用。重生成图标：`node apps/desktop/scripts/gen-icon.mjs`。
+- **自动更新**：引入 `electron-updater`，在 `createTray` 后 `autoUpdater.checkForUpdates()`，接 GitHub Releases。
+- 改动时务必保留 spawn/health-check/cleanup 握手。

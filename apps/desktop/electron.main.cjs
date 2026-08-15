@@ -7,12 +7,14 @@
  * 等它在本机空闲端口就绪后，把前端（由后端同源托管）加载进 BrowserWindow。
  * 后端本身零改动 —— 桌面端只是它的一个原生窗口外壳。
  *
+ * 托盘：关闭窗口改为最小化到托盘，仅通过托盘菜单「退出」才真正结束（并清理后端）。
+ *
  * 后端启动命令（与 `pnpm dsh web` 完全一致）：
  *   - 若 apps/cli/lib/bin.js 已存在（pnpm build 之后）：直接 `node <built> web ...`
  *   - 否则（源码态）：`node --import tsx/esm apps/cli/src/bin.ts web ...`
  */
 
-const { app, BrowserWindow, shell, ipcMain } = require('electron')
+const { app, BrowserWindow, shell, ipcMain, Tray, Menu, nativeImage } = require('electron')
 const { spawn } = require('node:child_process')
 const net = require('node:net')
 const path = require('node:path')
@@ -31,6 +33,7 @@ const repoRoot =
 
 let backend = null
 let mainWindow = null
+let tray = null
 let backendPort = 0
 let quitInitiated = false
 
@@ -123,6 +126,17 @@ function createWindow() {
       sandbox: false,
     },
   })
+  // 关闭窗口 → 最小化到托盘（仅托盘「退出」才会真正结束）。
+  win.on('close', (e) => {
+    if (!quitInitiated && process.platform !== 'darwin') {
+      e.preventDefault()
+      win.hide()
+      return
+    }
+  })
+  win.on('closed', () => {
+    mainWindow = null
+  })
   win.once('ready-to-show', () => win.show())
   // 让前端里 window.open / 外链落到系统浏览器，而不是新开 Electron 窗口。
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -132,24 +146,38 @@ function createWindow() {
   return win
 }
 
+function showErrorPage(msg) {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const safe = String(msg).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))
+  mainWindow.loadURL(
+    `data:text/html,<html><body style="font-family:system-ui;color:#ddd;background:#0b0e14;padding:2rem"><h1>DeepSeek Harness 后端启动失败</h1><p>请确认已执行 <code>pnpm install</code> 并构建前端（<code>pnpm --filter @deepseek-ai/dsh-web-frontend run build</code>）。</p><pre>${safe}</pre></body></html>`,
+  )
+}
+
 async function boot() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
   backendPort = await getFreePort()
   backend = startBackend(backendPort)
   try {
     await waitForBackend(backendPort)
   } catch (err) {
     console.error('[desktop] backend failed to start:', err)
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      const msg = String(err).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))
-      await mainWindow.loadURL(
-        `data:text/html,<html><body style="font-family:system-ui;color:#ddd;background:#0b0e14;padding:2rem"><h1>DeepSeek Harness 后端启动失败</h1><p>请确认已执行 <code>pnpm install</code> 并构建前端（<code>pnpm --filter @deepseek-ai/dsh-web-frontend run build</code>）。</p><pre>${msg}</pre></body></html>`,
-      )
-    }
+    showErrorPage(String(err))
     return
   }
   if (mainWindow && !mainWindow.isDestroyed()) {
     await mainWindow.loadURL(`http://127.0.0.1:${backendPort}/`)
   }
+}
+
+/** 重启后端（供托盘菜单与 IPC 复用）。 */
+async function restartBackend() {
+  shutdownBackend()
+  quitInitiated = false
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    await mainWindow.loadURL('data:text/html,<h1 style="color:#ddd;font-family:system-ui">正在重启后端…</h1>')
+  }
+  await boot()
 }
 
 function shutdownBackend() {
@@ -164,13 +192,51 @@ function shutdownBackend() {
   }
 }
 
-ipcMain.on('desktop:restart-backend', async () => {
-  shutdownBackend()
-  quitInitiated = false
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    await mainWindow.loadURL('data:text/html,<h1 style="color:#ddd;font-family:system-ui">正在重启后端…</h1>')
+/** 托盘：图标 + 点击显隐 + 右键菜单（显示 / 重启后端 / 退出）。 */
+function createTray() {
+  const iconPath = path.join(__dirname, 'assets', 'tray-icon.png')
+  let icon = nativeImage.createFromPath(iconPath)
+  if (icon.isEmpty()) {
+    // 兜底：内联一个 1x1 蓝色像素，避免 Windows 下 new Tray 抛错。
+    icon = nativeImage.createFromDataURL(
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC',
+    )
   }
-  await boot()
+  tray = new Tray(icon)
+  tray.setToolTip('DeepSeek Harness')
+  tray.on('click', () => {
+    if (!mainWindow) return
+    if (mainWindow.isVisible()) mainWindow.hide()
+    else {
+      mainWindow.show()
+      mainWindow.focus()
+    }
+  })
+  const menu = Menu.buildFromTemplate([
+    {
+      label: '显示',
+      click: () => {
+        if (mainWindow) {
+          mainWindow.show()
+          mainWindow.focus()
+        }
+      },
+    },
+    { label: '重启后端', click: () => restartBackend().catch((e) => console.error(e)) },
+    { type: 'separator' },
+    {
+      label: '退出',
+      click: () => {
+        quitInitiated = true
+        app.quit()
+      },
+    },
+  ])
+  tray.setContextMenu(menu)
+}
+
+ipcMain.on('desktop:restart-backend', () => {
+  restartBackend().catch((e) => console.error(e))
 })
 
 app.whenReady().then(async () => {
@@ -179,22 +245,19 @@ app.whenReady().then(async () => {
     return
   }
   mainWindow = createWindow()
-  mainWindow.on('closed', () => {
-    mainWindow = null
+  createTray()
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      mainWindow.show()
+      mainWindow.focus()
+    }
   })
   await boot()
 })
 
-app.on('second-instance', () => {
-  if (mainWindow) {
-    mainWindow.show()
-    mainWindow.focus()
-  }
-})
-
 app.on('window-all-closed', () => {
-  // 桌面端：关掉所有窗口即视为退出（含后端）。
-  if (process.platform !== 'darwin') {
+  // 桌面端：最小化到托盘后不会触发此处；真正的退出走托盘「退出」/ 单实例退出。
+  if (process.platform === 'darwin') {
     shutdownBackend()
     app.quit()
   }
