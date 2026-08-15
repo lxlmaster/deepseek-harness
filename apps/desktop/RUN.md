@@ -33,6 +33,8 @@ pnpm desktop
 ```
 
 启动后托盘出现 DeepSeek Harness 图标，窗口加载 `http://127.0.0.1:<空闲端口>/`。
+托盘右键菜单可「显示 / 重启后端 / 检查更新 / 退出」；窗口关闭改为最小化到托盘。
+后端日志实时写入 `app.getPath('logs')/dsh-backend.log`，可在故障排查时查看。
 
 ## 故障排查
 
@@ -52,13 +54,22 @@ pnpm desktop
 - **实际对话无响应**
   在仓库根目录放 `.env` 设置 `DEEPSEEK_API_KEY=...`，重启后端即可。
 
-## 生产安装包（可选）
+- **自动更新检查报错**
+  托盘/菜单「检查更新…」依赖 `build.publish` 配置的 GitHub Releases（lxlmaster/deepseek-harness）。
+  仓库尚未发布 Release、或无网络时检查会失败——属预期，不影响主功能。
+
+## 生产安装包（可选，开箱即用）
 
 ```sh
-# 产出 Windows NSIS 安装包到 apps/desktop/dist-electron
-pnpm desktop:pack
-# 需要先：pnpm build 全量 + build 前端 + 准备 build/icon.ico
+pnpm build                                  # 全量构建：apps/cli/lib、packages/*/lib
+pnpm --filter @deepseek-ai/dsh-web-frontend run build   # 前端 dist
+pnpm desktop:gen:ico                        # 生成 build/icon.ico（NSIS 必需）
+pnpm desktop:build:runtime                  # 组装自包含运行时 apps/desktop/runtime
+pnpm desktop:pack                           # 产出 Windows NSIS 安装包到 apps/desktop/dist-electron
 ```
+
+安装包会把 `runtime/` 作为 `extraResources` 打包进 `resources/harness`，双击启动即自带后端，
+无需另起服务。`scripts/build-runtime.mjs` 的细节与备选方案见 `README.md` 的「生产分发说明」。
 
 ## 为什么不在当前开发环境直接跑？
 

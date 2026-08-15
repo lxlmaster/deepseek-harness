@@ -59,6 +59,9 @@ pnpm desktop:pack:dir    # unpacked dir build (faster smoke test)
 
 ## Extending
 
-- **系统托盘（已实现）**：`electron.main.cjs` 的 `createTray()` 建 `Tray`（图标 `assets/tray-icon.png`，缺失时兜底 1x1 data URL，防 Windows `new Tray` 抛错）、点击显隐、右键菜单（显示 / 重启后端 / 退出）。窗口 `close` 在 win/linux 改为最小化到托盘，仅托盘「退出」或单实例才 `app.quit()` 并 `SIGTERM` 清理后端。`restartBackend()` 供 IPC 与托盘复用。重生成图标：`node apps/desktop/scripts/gen-icon.mjs`。
-- **自动更新**：引入 `electron-updater`，在 `createTray` 后 `autoUpdater.checkForUpdates()`，接 GitHub Releases。
+- **系统托盘（已实现）**：`electron.main.cjs` 的 `createTray()` 建 `Tray`（图标 `assets/tray-icon.png`，缺失时兜底 1x1 data URL，防 Windows `new Tray` 抛错）、点击显隐、右键菜单（显示 / 重启后端 / 检查更新 / 退出）。窗口 `close` 在 win/linux 改为最小化到托盘，仅托盘「退出」或单实例才 `app.quit()` 并 `SIGTERM` 清理后端。`restartBackend()` 供 IPC 与托盘复用。重生成图标：`node apps/desktop/scripts/gen-icon.mjs`；生成 NSIS 用 `build/icon.ico`：`node apps/desktop/scripts/gen-icon-ico.mjs`（或 `pnpm desktop:gen:ico`）。
+- **轻量应用菜单（已实现）**：`createAppMenu()` 设标准菜单（检查更新 / 重新加载 / 开发者工具 / 重启后端 / 退出 + 编辑/视图），Windows 显示在窗口标题栏上方。注意：`before-quit` 中必须置 `quitInitiated=true`，否则 close 处理器拦截窗口关闭导致 app 永不退出。
+- **自动更新（已实现）**：`electron-updater` 已接入（`package.json` 的 `dependencies` + `build.publish` 指向 `lxlmaster/deepseek-harness` GitHub Releases）。`setupAutoUpdater()` 配置事件转发到渲染进程（`update-status` IPC），托盘与菜单均有「检查更新…」，`update-downloaded` 后提示退出重装。依赖缺失时安全降级（不阻断主流程）。preload 暴露 `checkForUpdates / onUpdateStatus / quitAndInstall`。
+- **后端日志可观测（已实现）**：后端子进程 stdout/stderr 实时写入 `app.getPath('logs')/dsh-backend.log`，并经 `backend-log` IPC 推送到渲染进程，历史可由 `desktop:get-backend-logs` 拉取；preload 暴露 `onBackendLog / getBackendLogs`。
+- **生产运行时打包（已实现脚本骨架）**：`build.extraResources` 把 `apps/desktop/runtime` 映射到安装包 `resources/harness`；`scripts/build-runtime.mjs`（或 `pnpm desktop:build:runtime`）搬运已构建的 `apps/cli/lib`、`apps/web/dist`、`packages/*/lib`、`node_modules`（保留 pnpm 符号链接）、锁文件到 `runtime/`。打包态 `repoRoot = resources/harness`。若体积/原生依赖解析出问题，备选 `pnpm deploy` 产扁平 node_modules。该步必须在 Windows 桌面实测验证。
 - 改动时务必保留 spawn/health-check/cleanup 握手。

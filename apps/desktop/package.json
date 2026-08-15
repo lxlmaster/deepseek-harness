@@ -9,7 +9,12 @@
     "dev": "electron .",
     "start": "electron .",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder --win nsis"
+    "dist": "electron-builder --win nsis",
+    "gen:ico": "node scripts/gen-icon-ico.mjs",
+    "build:runtime": "node scripts/build-runtime.mjs"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.4"
   },
   "devDependencies": {
     "electron": "^36.0.0",
@@ -23,6 +28,19 @@
       "electron.main.cjs",
       "preload.cjs",
       "assets"
+    ],
+    "extraResources": [
+      {
+        "from": "runtime",
+        "to": "harness"
+      }
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "lxlmaster",
+        "repo": "deepseek-harness"
+      }
     ],
     "directories": {
       "output": "dist-electron"

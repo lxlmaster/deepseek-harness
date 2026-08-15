@@ -142,6 +142,8 @@
     "desktop": "pnpm --filter @deepseek-ai/dsh-desktop run dev",
     "desktop:pack": "pnpm --filter @deepseek-ai/dsh-desktop run dist",
     "desktop:pack:dir": "pnpm --filter @deepseek-ai/dsh-desktop run pack",
+    "desktop:gen:ico": "pnpm --filter @deepseek-ai/dsh-desktop run gen:ico",
+    "desktop:build:runtime": "pnpm --filter @deepseek-ai/dsh-desktop run build:runtime",
     "postinstall": "node scripts/install-lefthook.mjs"
   },
   "devDependencies": {

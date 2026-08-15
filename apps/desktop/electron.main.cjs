@@ -12,6 +12,12 @@
  * 后端启动命令（与 `pnpm dsh web` 完全一致）：
  *   - 若 apps/cli/lib/bin.js 已存在（pnpm build 之后）：直接 `node <built> web ...`
  *   - 否则（源码态）：`node --import tsx/esm apps/cli/src/bin.ts web ...`
+ *
+ * 额外能力（在「外壳 + 托盘 + 文档」地基之上扩展，未改动握手）：
+ *   - 自动更新：electron-updater 接 GitHub Releases（lxlmaster/deepseek-harness）。
+ *   - 可观测：后端子进程 stdout/stderr 同时落盘 app.getPath('logs')/dsh-backend.log
+ *     并实时推送到渲染进程（IPC: backend-log），供「检查更新 / 日志」面板使用。
+ *   - 轻量应用菜单：检查更新 / 重启后端 / 开发者工具 / 退出。
  */
 
 const { app, BrowserWindow, shell, ipcMain, Tray, Menu, nativeImage } = require('electron')
@@ -36,6 +42,83 @@ let mainWindow = null
 let tray = null
 let backendPort = 0
 let quitInitiated = false
+
+// ---- 后端日志：落盘 + 内存环形缓冲 + 实时推送到渲染进程 ----
+let logStream = null
+const backendLogBuffer = []
+const LOG_BUFFER_MAX = 2000
+
+function ensureLog() {
+  if (logStream) return
+  try {
+    const dir = app.getPath('logs')
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, 'dsh-backend.log')
+    logStream = fs.createWriteStream(file, { flags: 'a' })
+    logStream.on('error', (e) => console.error('[desktop] log write error:', e.message))
+  } catch (e) {
+    console.error('[desktop] cannot open backend log file:', e.message)
+  }
+}
+
+function pushLog(line) {
+  if (logStream) logStream.write(line + '\n')
+  backendLogBuffer.push(line)
+  if (backendLogBuffer.length > LOG_BUFFER_MAX) backendLogBuffer.shift()
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('backend-log', line)
+  }
+}
+
+// ---- 自动更新（electron-updater，可选依赖，缺失时安全降级） ----
+let autoUpdater = null
+let hasUpdater = false
+
+function setupAutoUpdater() {
+  try {
+    autoUpdater = require('electron-updater').autoUpdater
+    hasUpdater = true
+  } catch {
+    console.log('[desktop] electron-updater 未安装，跳过自动更新')
+    return
+  }
+  autoUpdater.autoDownload = false
+  autoUpdater.on('update-available', (info) =>
+    sendUpdateStatus({ status: 'available', version: info && info.version }),
+  )
+  autoUpdater.on('update-not-available', () => sendUpdateStatus({ status: 'not-available' }))
+  autoUpdater.on('download-progress', (p) =>
+    sendUpdateStatus({ status: 'downloading', percent: p && p.percent }),
+  )
+  autoUpdater.on('update-downloaded', (info) => {
+    sendUpdateStatus({ status: 'downloaded', version: info && info.version })
+    showUpdateReady(info && info.version)
+  })
+  autoUpdater.on('error', (e) =>
+    sendUpdateStatus({ status: 'error', message: (e && e.message) || String(e) }),
+  )
+}
+
+function sendUpdateStatus(payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('update-status', payload)
+  }
+}
+
+function checkForUpdates() {
+  if (!hasUpdater) {
+    sendUpdateStatus({ status: 'error', message: 'electron-updater 未安装' })
+    return
+  }
+  autoUpdater
+    .checkForUpdates()
+    .catch((e) => sendUpdateStatus({ status: 'error', message: (e && e.message) || String(e) }))
+}
+
+function showUpdateReady(version) {
+  if (!tray) return
+  tray.setToolTip(`DeepSeek Harness · 更新已就绪${version ? ' (v' + version + ')' : ''}，点击退出并安装`)
+}
 
 /** 找一个本机 127.0.0.1 上的空闲端口，避免和已运行的 `dsh web`(默认 3080) 冲突。 */
 function getFreePort() {
@@ -65,6 +148,7 @@ function backendLaunch(port) {
 }
 
 function startBackend(port) {
+  ensureLog()
   const { cmd, args } = backendLaunch(port)
   const child = spawn(cmd, args, {
     cwd: repoRoot,
@@ -72,8 +156,17 @@ function startBackend(port) {
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  child.stdout?.on('data', (d) => console.log('[dsh]', d.toString().trim()))
-  child.stderr?.on('data', (d) => console.error('[dsh]', d.toString().trim()))
+  const tag = (buf) => {
+    const text = buf.toString().replace(/\r?\n$/, '')
+    text.split('\n').forEach((line) => {
+      const trimmed = line.trim()
+      if (!trimmed) return
+      console.log('[dsh]', trimmed)
+      pushLog(trimmed)
+    })
+  }
+  child.stdout?.on('data', tag)
+  child.stderr?.on('data', tag)
   child.on('exit', (code, signal) => {
     console.log(`[dsh] backend exited code=${code} signal=${signal}`)
     backend = null
@@ -192,7 +285,7 @@ function shutdownBackend() {
   }
 }
 
-/** 托盘：图标 + 点击显隐 + 右键菜单（显示 / 重启后端 / 退出）。 */
+/** 托盘：图标 + 点击显隐 + 右键菜单（显示 / 重启后端 / 检查更新 / 退出）。 */
 function createTray() {
   const iconPath = path.join(__dirname, 'assets', 'tray-icon.png')
   let icon = nativeImage.createFromPath(iconPath)
@@ -223,6 +316,7 @@ function createTray() {
       },
     },
     { label: '重启后端', click: () => restartBackend().catch((e) => console.error(e)) },
+    { label: '检查更新…', click: () => checkForUpdates() },
     { type: 'separator' },
     {
       label: '退出',
@@ -235,9 +329,62 @@ function createTray() {
   tray.setContextMenu(menu)
 }
 
+/** 轻量应用菜单（Windows 下显示在窗口标题栏上方）。 */
+function createAppMenu() {
+  const template = [
+    {
+      label: 'DeepSeek Harness',
+      submenu: [
+        { label: '检查更新…', click: () => checkForUpdates() },
+        { type: 'separator' },
+        { role: 'reload', label: '重新加载' },
+        { role: 'toggleDevTools', label: '开发者工具' },
+        { type: 'separator' },
+        { label: '重启后端', click: () => restartBackend().catch((e) => console.error(e)) },
+        { type: 'separator' },
+        { role: 'quit', label: '退出' },
+      ],
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo', label: '撤销' },
+        { role: 'redo', label: '重做' },
+        { type: 'separator' },
+        { role: 'cut', label: '剪切' },
+        { role: 'copy', label: '复制' },
+        { role: 'paste', label: '粘贴' },
+      ],
+    },
+    {
+      label: '视图',
+      submenu: [
+        { role: 'resetZoom', label: '重置缩放' },
+        { role: 'zoomIn', label: '放大' },
+        { role: 'zoomOut', label: '缩小' },
+        { type: 'separator' },
+        { role: 'togglefullscreen', label: '全屏' },
+      ],
+    },
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
 ipcMain.on('desktop:restart-backend', () => {
   restartBackend().catch((e) => console.error(e))
 })
+
+ipcMain.handle('desktop:check-for-updates', () => {
+  checkForUpdates()
+  return { ok: true }
+})
+
+ipcMain.handle('desktop:quit-and-install', () => {
+  if (hasUpdater) autoUpdater.quitAndInstall()
+  return { ok: hasUpdater }
+})
+
+ipcMain.handle('desktop:get-backend-logs', () => backendLogBuffer.join('\n'))
 
 app.whenReady().then(async () => {
   if (!app.requestSingleInstanceLock()) {
@@ -246,6 +393,8 @@ app.whenReady().then(async () => {
   }
   mainWindow = createWindow()
   createTray()
+  createAppMenu()
+  setupAutoUpdater()
   app.on('second-instance', () => {
     if (mainWindow) {
       mainWindow.show()
@@ -256,12 +405,17 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  // 桌面端：最小化到托盘后不会触发此处；真正的退出走托盘「退出」/ 单实例退出。
+  // 桌面端：最小化到托盘后不会触发此处；真正的退出走托盘「退出」/ 单实例退出 / 菜单退出。
   if (process.platform === 'darwin') {
     shutdownBackend()
     app.quit()
   }
 })
 
-app.on('before-quit', shutdownBackend)
+// before-quit 必须置 quitInitiated，否则 close 处理器会拦截窗口关闭导致 app 永不退出
+// （菜单「退出」、二次实例退出都依赖此路径）。
+app.on('before-quit', () => {
+  quitInitiated = true
+  shutdownBackend()
+})
 app.on('quit', shutdownBackend)
